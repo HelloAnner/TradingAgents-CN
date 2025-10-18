@@ -360,6 +360,23 @@ chmod +x scripts/smart_start.sh && ./scripts/smart_start.sh
 # Web界面: http://localhost:8501
 ```
 
+#### 🕒 批量自动化调度（无Web依赖）
+
+- 基于根目录 `global.json` 与 `tasks/*.json` 自动运行每日分析并发送邮件。
+  - 启动时立即执行一次；之后每天本地时区 `00:00` 定时执行（可在 `global.json` 配置）。
+  - 输出保存到 `reports/<股票代码>/<时间>/`，包含 `overview.txt`（正文）与 PDF 报告（附件）。
+
+使用步骤：
+- 在 `.env` 配置必要的 API Key：`DASHSCOPE_API_KEY`、`FINNHUB_API_KEY`、`TUSHARE_TOKEN`（如使用A股数据）等。
+- 编辑根目录 `global.json`（默认分析参数、SMTP 邮件配置、时区与时间）。
+- 在 `tasks/` 目录新增多个 `<代码>.json`（示例：`tasks/600519.json`）。
+- 启动调度服务：
+  ```bash
+  docker-compose up -d --build scheduler
+  docker-compose logs -f scheduler
+  ```
+
+
 ### 💻 本地部署
 
 ```bash
@@ -383,6 +400,82 @@ python start_web.py
 4. **实时跟踪**: 观察实时进度和分析步骤
 5. **查看报告**: 点击"📊 查看分析报告"按钮
 6. **导出报告**: 支持Word/PDF/Markdown格式
+
+**模型配置（global.json + .env）**
+
+- 通过根目录 `global.json` 配置聊天模型与向量模型（embedding）并与 `.env` 中的密钥配合，适配 DeepSeek、OpenAI、内部 OpenAI 兼容端点、Ollama 等。
+
+- 最简配置（保持默认 DeepSeek）示例：
+  ```json
+  {
+    "analysis": {
+      "llm_provider": "deepseek",
+      "llm_model": "deepseek-chat"
+    }
+  }
+  ```
+
+- 进阶配置（自定义聊天 base_url / 模型名；向量模型单独配置）：
+  ```json
+  {
+    "llm": {
+      "provider": "custom_openai",
+      "base_url": "https://openai.mycorp.internal/v1",
+      "model": "gpt-4o-mini",
+      "quick_model": "gpt-4o-mini",
+      "deep_model": "gpt-4o"
+    },
+    "embeddings": {
+      "provider": "custom_openai",
+      "base_url": "https://vector.mycorp.internal/v1",
+      "model": "text-embedding-3-large",
+      "api_key_env": "CUSTOM_EMBEDDINGS_API_KEY"  
+    }
+  }
+  ```
+
+- DeepSeek 专用（支持自定义 base_url）：
+  ```json
+  {
+    "llm": {
+      "provider": "deepseek",
+      "base_url": "https://api.deepseek.com",
+      "model": "deepseek-chat"
+    }
+  }
+  ```
+
+- Ollama 本地：
+  ```json
+  {
+    "llm": {
+      "provider": "ollama",
+      "base_url": "http://localhost:11434/v1",
+      "model": "llama3.1:8b"
+    },
+    "embeddings": {
+      "provider": "ollama",
+      "base_url": "http://localhost:11434/v1",
+      "model": "nomic-embed-text"
+    }
+  }
+  ```
+
+- .env 中的密钥对应关系（仅示例，按所用提供商填写）：
+  - DeepSeek 聊天/向量：`DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`）
+  - OpenAI：`OPENAI_API_KEY`
+  - 自定义 OpenAI 兼容聊天：`CUSTOM_OPENAI_API_KEY`
+  - 自定义 OpenAI 兼容向量：`CUSTOM_EMBEDDINGS_API_KEY`（或在 `embeddings.api_key_env` 指定其他变量名）
+  - OpenRouter：`OPENROUTER_API_KEY`
+  - 阿里百炼（DashScope）：`DASHSCOPE_API_KEY`
+
+- 运行时读取优先级：
+  - 聊天模型：`global.json.llm.*` > `analysis.llm_*`（兼容旧字段）> 默认值。
+  - 向量模型：`global.json.embeddings.*` 优先，若未配置则按提供商回退到 `.env` 里的默认方案（例如 DeepSeek 未配置嵌入时回退 OpenAI 嵌入）。
+
+- 代码对接点：
+  - 聊天模型：`web/utils/analysis_runner.py:run_stock_analysis` 会将 `llm` 配置注入到 `TradingAgentsGraph`（`tradingagents/graph/trading_graph.py:__init__`）。
+  - 向量模型：`tradingagents/agents/utils/memory.py` 优先使用 `global.json.embeddings` 的 `provider/base_url/model/api_key_env` 创建 OpenAI 兼容客户端；否则回退到原有逻辑。
 
 ## 🔐 用户权限管理
 

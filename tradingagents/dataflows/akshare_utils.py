@@ -8,6 +8,8 @@ import pandas as pd
 from typing import Optional, Dict, Any
 import warnings
 from datetime import datetime
+import os
+from contextlib import contextmanager
 
 # 导入日志模块
 from tradingagents.utils.logging_manager import get_logger
@@ -32,6 +34,42 @@ class AKShareProvider:
             self.ak = None
             self.connected = False
             logger.error(f"❌ AKShare未安装")
+
+    @contextmanager
+    def _no_proxy_eastmoney(self):
+        """在上下文内为东财域名禁用代理，避免企业代理导致的连接失败。
+
+        说明:
+        - 仅设置 NO_PROXY/no_proxy，覆盖 .eastmoney.com 全域
+        - 不移除全局 HTTP(S)_PROXY，降低对其他请求的影响
+        - 作用域仅限 with 块内
+        """
+        # 备份原值
+        old_no_proxy_upper = os.environ.get("NO_PROXY")
+        old_no_proxy_lower = os.environ.get("no_proxy")
+
+        # 追加 .eastmoney.com 到 NO_PROXY 列表
+        def _append_no_proxy(current: Optional[str]) -> str:
+            domains = {d.strip() for d in (current or "").split(",") if d.strip()}
+            # 覆盖全子域
+            domains.update({".eastmoney.com"})
+            return ",".join(sorted(domains)) if domains else ".eastmoney.com"
+
+        try:
+            os.environ["NO_PROXY"] = _append_no_proxy(old_no_proxy_upper)
+            os.environ["no_proxy"] = _append_no_proxy(old_no_proxy_lower)
+            yield
+        finally:
+            # 还原环境
+            if old_no_proxy_upper is None:
+                os.environ.pop("NO_PROXY", None)
+            else:
+                os.environ["NO_PROXY"] = old_no_proxy_upper
+
+            if old_no_proxy_lower is None:
+                os.environ.pop("no_proxy", None)
+            else:
+                os.environ["no_proxy"] = old_no_proxy_lower
 
     def _configure_timeout(self):
         """配置AKShare的超时设置"""
@@ -150,13 +188,15 @@ class AKShareProvider:
 
             def fetch_hist_data():
                 try:
-                    result[0] = self.ak.stock_hk_hist(
-                        symbol=hk_symbol,
-                        period="daily",
-                        start_date=start_date_formatted,
-                        end_date=end_date_formatted,
-                        adjust=""
-                    )
+                    # 对东财域名禁用代理，避免 ProxyError
+                    with self._no_proxy_eastmoney():
+                        result[0] = self.ak.stock_hk_hist(
+                            symbol=hk_symbol,
+                            period="daily",
+                            start_date=start_date_formatted,
+                            end_date=end_date_formatted,
+                            adjust=""
+                        )
                 except Exception as e:
                     exception[0] = e
 
@@ -206,7 +246,15 @@ class AKShareProvider:
                 return None
 
         except Exception as e:
-            logger.error(f"❌ AKShare获取港股数据失败: {e}")
+            # 常见代理错误提示
+            msg = str(e)
+            if "ProxyError" in msg or "proxy" in msg.lower():
+                logger.error(
+                    "❌ AKShare获取港股数据失败(代理问题疑似): %s | 建议在运行环境设置 NO_PROXY=.eastmoney.com 或关闭代理后重试",
+                    e,
+                )
+            else:
+                logger.error(f"❌ AKShare获取港股数据失败: {e}")
             return None
 
     def get_hk_stock_info(self, symbol: str) -> Dict[str, Any]:
@@ -244,7 +292,9 @@ class AKShareProvider:
 
             def fetch_data():
                 try:
-                    result[0] = self.ak.stock_hk_spot_em()
+                    # 对东财域名禁用代理，避免 ProxyError
+                    with self._no_proxy_eastmoney():
+                        result[0] = self.ak.stock_hk_spot_em()
                 except Exception as e:
                     exception[0] = e
 
@@ -268,7 +318,7 @@ class AKShareProvider:
                 spot_data = result[0]
 
             # 查找对应的股票信息
-            if not spot_data.empty:
+            if spot_data is not None and not spot_data.empty:
                 # 查找匹配的股票
                 matching_stocks = spot_data[spot_data['代码'].str.contains(hk_symbol[:5], na=False)]
 
@@ -283,17 +333,40 @@ class AKShareProvider:
                         'source': 'akshare'
                     }
 
-            # 如果没有找到，返回基本信息
+            # 如果未找到或数据为空，尝试使用 Yahoo Finance 作为信息兜底
+            try:
+                from tradingagents.dataflows.hk_stock_utils import get_hk_stock_info as y_get_hk_info
+                y_info = y_get_hk_info(symbol)
+                if isinstance(y_info, dict) and y_info.get('name') and not str(y_info.get('name', '')).startswith('港股'):
+                    y_info.setdefault('source', 'yfinance_hk')
+                    logger.info(f"✅ 使用Yahoo Finance兜底获取港股信息: {symbol} -> {y_info.get('name')}")
+                    return y_info
+            except Exception as _:
+                pass
+
+            # 最终兜底：返回基本信息
             return {
                 'symbol': symbol,
                 'name': f'港股{symbol}',
                 'currency': 'HKD',
                 'exchange': 'HKG',
-                'source': 'akshare'
+                'source': 'akshare_fallback'
             }
 
         except Exception as e:
-            logger.error(f"❌ AKShare获取港股信息失败: {e}")
+            msg = str(e)
+            if (
+                "ProxyError" in msg
+                or "proxy" in msg.lower()
+                or "RemoteDisconnected" in msg
+                or "Connection aborted" in msg
+            ):
+                logger.warning(
+                    "⚠️ AKShare获取港股信息失败(网络/代理/远端关闭连接): %s | 将使用备用信息；建议为 eastmoney 配置 NO_PROXY 或稍后重试",
+                    e,
+                )
+            else:
+                logger.warning(f"⚠️ AKShare获取港股信息失败: {e}")
             return {
                 'symbol': symbol,
                 'name': f'港股{symbol}',
@@ -486,7 +559,11 @@ def format_hk_stock_data_akshare(symbol: str, data: pd.DataFrame, start_date: st
             provider = get_akshare_provider()
             stock_info = provider.get_hk_stock_info(symbol)
             stock_name = stock_info.get('name', f'港股{symbol}')
-            logger.info(f"✅ 港股信息获取成功: {stock_name}")
+            source = stock_info.get('source', '')
+            if source == 'akshare':
+                logger.info(f"✅ 港股信息获取成功: {stock_name}")
+            else:
+                logger.warning(f"⚠️ 使用备用港股信息: {stock_name} (source={source})")
         except Exception as info_error:
             logger.error(f"⚠️ 港股信息获取失败，使用默认信息: {info_error}")
             # 继续处理，使用默认信息

@@ -164,7 +164,13 @@ class TradingAgentsGraph:
             if not deepseek_api_key:
                 raise ValueError("使用DeepSeek需要设置DEEPSEEK_API_KEY环境变量")
 
-            deepseek_base_url = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
+            # 优先读取配置文件中的 base_url，其次读取环境变量，最后默认官方端点
+            deepseek_base_url = (
+                self.config.get('deepseek_base_url')
+                or self.config.get('backend_url')
+                or os.getenv('DEEPSEEK_BASE_URL')
+                or 'https://api.deepseek.com'
+            )
 
             # 使用支持token统计的DeepSeek适配器
             self.deep_thinking_llm = ChatDeepSeek(
@@ -191,7 +197,7 @@ class TradingAgentsGraph:
             if not custom_api_key:
                 raise ValueError("使用自定义OpenAI端点需要设置CUSTOM_OPENAI_API_KEY环境变量")
             
-            custom_base_url = self.config.get("custom_openai_base_url", "https://api.openai.com/v1")
+            custom_base_url = self.config.get("custom_openai_base_url") or self.config.get("backend_url") or "https://api.openai.com/v1"
             
             logger.info(f"🔧 [自定义OpenAI] 使用端点: {custom_base_url}")
             

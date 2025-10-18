@@ -12,7 +12,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Union
 import json
-import toml
+# 兼容读取 TOML：优先使用标准库 tomllib，其次 tomli，最后第三方 toml。
+try:  # Python 3.11+
+    import tomllib as _toml_reader  # type: ignore
+    _TOML_READER_NAME = 'tomllib'
+except Exception:  # pragma: no cover
+    try:
+        import tomli as _toml_reader  # type: ignore
+        _TOML_READER_NAME = 'tomli'
+    except Exception:
+        try:
+            import toml as _toml_reader  # type: ignore
+            _TOML_READER_NAME = 'toml'
+        except Exception:
+            _toml_reader = None
+            _TOML_READER_NAME = None
 
 # 注意：这里不能导入自己，会造成循环导入
 # 在日志系统初始化前，使用标准库自举日志器，避免未定义引用
@@ -140,8 +154,20 @@ class TradingAgentsLogger:
         for config_path in config_paths:
             if config_path and Path(config_path).exists():
                 try:
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        config_data = toml.load(f)
+                    # 无可用TOML解析器则跳过文件加载，回退到环境变量默认配置
+                    if _toml_reader is None:
+                        _bootstrap_logger.warning(
+                            f"警告: 未找到TOML解析器(tomllib/tomli/toml)，忽略 {config_path} 配置，使用默认日志配置"
+                        )
+                        continue
+
+                    # tomllib/tomli 需要二进制模式；toml 使用文本模式
+                    if _TOML_READER_NAME in ('tomllib', 'tomli'):
+                        with open(config_path, 'rb') as f:
+                            config_data = _toml_reader.load(f)
+                    else:
+                        with open(config_path, 'r', encoding='utf-8') as f:
+                            config_data = _toml_reader.load(f)
 
                     # 转换配置格式
                     return self._convert_toml_config(config_data)

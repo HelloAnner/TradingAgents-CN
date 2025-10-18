@@ -15,14 +15,8 @@ from pathlib import Path
 import hashlib
 import logging
 
-# MongoDB相关导入
-try:
-    from web.utils.mongodb_report_manager import MongoDBReportManager
-    MONGODB_AVAILABLE = True
-    print("✅ MongoDB模块导入成功")
-except ImportError as e:
-    MONGODB_AVAILABLE = False
-    print(f"❌ MongoDB模块导入失败: {e}")
+# 已移除：MongoDB 相关依赖与导入
+MONGODB_AVAILABLE = False
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -1616,73 +1610,7 @@ def save_analysis_result(analysis_id: str, stock_symbol: str, analysts: List[str
         with open(result_file, 'w', encoding='utf-8') as f:
             json.dump(result_entry, f, ensure_ascii=False, indent=2)
 
-        # 2. 保存到MongoDB（如果可用）
-        if MONGODB_AVAILABLE:
-            try:
-                print(f"💾 [MongoDB保存] 开始保存分析结果: {analysis_id}")
-                mongodb_manager = MongoDBReportManager()
-
-                # 使用标准的save_analysis_report方法，确保数据结构一致
-                analysis_results = {
-                    'stock_symbol': result_entry.get('stock_symbol', ''),
-                    'analysts': result_entry.get('analysts', []),
-                    'research_depth': result_entry.get('research_depth', 1),
-                    'summary': result_entry.get('summary', '')
-                }
-
-                # 尝试从文件系统读取报告内容
-                reports = {}
-                try:
-                    # 构建报告目录路径
-                    from pathlib import Path
-                    import os
-
-                    # 获取当前日期
-                    current_date = datetime.now().strftime('%Y-%m-%d')
-
-                    # 构建报告路径
-                    project_root = Path(__file__).parent.parent.parent
-                    reports_dir = project_root / "data" / "analysis_results" / stock_symbol / current_date / "reports"
-
-                    # 确保路径在Windows上正确显示（避免双反斜杠）
-                    reports_dir_str = os.path.normpath(str(reports_dir))
-                    print(f"🔍 [MongoDB保存] 查找报告目录: {reports_dir_str}")
-
-                    if reports_dir.exists():
-                        # 读取所有报告文件
-                        for report_file in reports_dir.glob("*.md"):
-                            try:
-                                with open(report_file, 'r', encoding='utf-8') as f:
-                                    content = f.read()
-                                    report_name = report_file.stem
-                                    reports[report_name] = content
-                                    print(f"✅ [MongoDB保存] 读取报告: {report_name} ({len(content)} 字符)")
-                            except Exception as e:
-                                print(f"⚠️ [MongoDB保存] 读取报告文件失败 {report_file}: {e}")
-
-                        print(f"📊 [MongoDB保存] 共读取 {len(reports)} 个报告文件")
-                    else:
-                        print(f"⚠️ [MongoDB保存] 报告目录不存在: {reports_dir_str}")
-
-                except Exception as e:
-                    print(f"⚠️ [MongoDB保存] 读取报告文件异常: {e}")
-                    reports = {}
-
-                # 使用标准保存方法，确保字段结构一致
-                success = mongodb_manager.save_analysis_report(
-                    stock_symbol=result_entry.get('stock_symbol', ''),
-                    analysis_results=analysis_results,
-                    reports=reports
-                )
-
-                if success:
-                    print(f"✅ [MongoDB保存] 分析结果已保存到MongoDB: {analysis_id} (包含 {len(reports)} 个报告)")
-                else:
-                    print(f"❌ [MongoDB保存] 保存失败: {analysis_id}")
-
-            except Exception as e:
-                print(f"❌ [MongoDB保存] 保存异常: {e}")
-                logger.error(f"MongoDB保存异常: {e}")
+        # 2. 已移除：保存到 MongoDB
 
         return True
 

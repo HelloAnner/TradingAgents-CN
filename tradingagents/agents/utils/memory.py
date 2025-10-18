@@ -1,8 +1,6 @@
 import chromadb
 from chromadb.config import Settings
 from openai import OpenAI
-import dashscope
-from dashscope import TextEmbedding
 import os
 import threading
 import hashlib
@@ -119,8 +117,60 @@ class FinancialSituationMemory:
         # 根据LLM提供商选择嵌入模型和客户端
         # 初始化降级选项标志
         self.fallback_available = False
-        
-        if self.llm_provider == "dashscope" or self.llm_provider == "alibaba":
+
+        # 允许在 global.json 中通过 embeddings 块覆盖默认的向量服务
+        self._embeddings_override = False
+        embed_cfg = {}
+        try:
+            if isinstance(config, dict):
+                embed_cfg = config.get("embeddings") or {}
+        except Exception:
+            embed_cfg = {}
+
+        if embed_cfg:
+            provider = str(embed_cfg.get("provider", self.llm_provider)).lower()
+            model_name = str(embed_cfg.get("model", os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')))
+            base_url = embed_cfg.get("base_url")
+            api_key_env = embed_cfg.get("api_key_env")
+            if not api_key_env:
+                api_key_env = {
+                    'openai': 'OPENAI_API_KEY',
+                    'custom_openai': 'CUSTOM_EMBEDDINGS_API_KEY',
+                    'internal_openai': 'CUSTOM_EMBEDDINGS_API_KEY',
+                    'deepseek': 'DEEPSEEK_API_KEY',
+                    'openrouter': 'OPENROUTER_API_KEY',
+                    'ollama': 'OLLAMA_API_KEY',
+                }.get(provider, 'OPENAI_API_KEY')
+            api_key_val = os.getenv(api_key_env)
+
+            if not base_url:
+                base_url = {
+                    'openai': 'https://api.openai.com/v1',
+                    'deepseek': 'https://api.deepseek.com',
+                    'openrouter': 'https://openrouter.ai/api/v1',
+                    'ollama': 'http://localhost:11434/v1',
+                    'custom_openai': None,
+                    'internal_openai': None,
+                }.get(provider)
+
+            try:
+                if api_key_val and base_url:
+                    self.client = OpenAI(api_key=api_key_val, base_url=base_url)
+                elif api_key_val and not base_url:
+                    self.client = OpenAI(api_key=api_key_val)
+                elif base_url:
+                    # 本地/内部端点可能不需要key
+                    self.client = OpenAI(base_url=base_url)
+                else:
+                    self.client = OpenAI()
+                self.embedding = model_name
+                self._embeddings_override = True
+                logger.info(f"🧠 [Embeddings] 使用自定义配置 provider={provider}, model={model_name}, base_url={base_url}")
+            except Exception as e:
+                logger.error(f"❌ 初始化自定义向量服务失败，将回退默认逻辑: {e}")
+                self._embeddings_override = False
+
+        if (not self._embeddings_override) and (self.llm_provider == "dashscope" or self.llm_provider == "alibaba"):
             self.embedding = "text-embedding-v3"
             self.client = None  # DashScope不需要OpenAI客户端
 
@@ -130,8 +180,6 @@ class FinancialSituationMemory:
                 try:
                     # 尝试导入和初始化DashScope
                     import dashscope
-                    from dashscope import TextEmbedding
-
                     dashscope.api_key = dashscope_key
                     logger.info(f"✅ DashScope API密钥已配置，启用记忆功能")
 
@@ -154,7 +202,7 @@ class FinancialSituationMemory:
                 self.client = "DISABLED"
                 logger.warning(f"⚠️ 未找到DASHSCOPE_API_KEY，记忆功能已禁用")
                 logger.info(f"💡 系统将继续运行，但不会保存或检索历史记忆")
-        elif self.llm_provider == "qianfan":
+        elif (not self._embeddings_override) and self.llm_provider == "qianfan":
             # 千帆（文心一言）embedding配置
             # 千帆目前没有独立的embedding API，使用阿里百炼作为降级选项
             dashscope_key = os.getenv('DASHSCOPE_API_KEY')
@@ -162,8 +210,6 @@ class FinancialSituationMemory:
                 try:
                     # 使用阿里百炼嵌入服务作为千帆的embedding解决方案
                     import dashscope
-                    from dashscope import TextEmbedding
-
                     dashscope.api_key = dashscope_key
                     self.embedding = "text-embedding-v3"
                     self.client = None
@@ -181,63 +227,41 @@ class FinancialSituationMemory:
                 self.client = "DISABLED"
                 logger.warning(f"⚠️ 千帆未找到DASHSCOPE_API_KEY，记忆功能已禁用")
                 logger.info(f"💡 系统将继续运行，但不会保存或检索历史记忆")
-        elif self.llm_provider == "deepseek":
-            # 检查是否强制使用OpenAI嵌入
-            force_openai = os.getenv('FORCE_OPENAI_EMBEDDING', 'false').lower() == 'true'
-
-            if not force_openai:
-                # 尝试使用阿里百炼嵌入
-                dashscope_key = os.getenv('DASHSCOPE_API_KEY')
-                if dashscope_key:
-                    try:
-                        # 测试阿里百炼是否可用
-                        import dashscope
-                        from dashscope import TextEmbedding
-
-                        dashscope.api_key = dashscope_key
-                        # 验证TextEmbedding可用性（不需要实际调用）
-                        self.embedding = "text-embedding-v3"
-                        self.client = None
-                        logger.info(f"💡 DeepSeek使用阿里百炼嵌入服务")
-                    except ImportError as e:
-                        logger.error(f"⚠️ DashScope包未安装: {e}")
-                        dashscope_key = None  # 强制降级
-                    except Exception as e:
-                        logger.error(f"⚠️ 阿里百炼嵌入初始化失败: {e}")
-                        dashscope_key = None  # 强制降级
-            else:
-                dashscope_key = None  # 跳过阿里百炼
-
-            if not dashscope_key or force_openai:
-                # 降级到OpenAI嵌入
-                self.embedding = "text-embedding-3-small"
+        elif (not self._embeddings_override) and self.llm_provider == "deepseek":
+            # DeepSeek: 仅在提供明确的嵌入模型名时，才使用DeepSeek嵌入；否则回退到OpenAI嵌入
+            self.client = None
+            deepseek_key = os.getenv('DEEPSEEK_API_KEY')
+            ds_embed_model = os.getenv('DEEPSEEK_EMBEDDING_MODEL', '').strip()
+            if deepseek_key and ds_embed_model:
+                try:
+                    # 使用 DeepSeek 自身的嵌入（需要其支持 embeddings 端点与该模型名）
+                    self.embedding = ds_embed_model
+                    self.client = OpenAI(
+                        api_key=deepseek_key,
+                        base_url="https://api.deepseek.com"
+                    )
+                    logger.info(f"✅ 使用 DeepSeek 嵌入模型: {ds_embed_model}")
+                except Exception as e:
+                    logger.error(f"❌ DeepSeek嵌入初始化失败: {e}")
+                    self.client = None
+            # 若未配置DeepSeek嵌入模型，或初始化失败，尝试OpenAI嵌入
+            if self.client is None:
                 openai_key = os.getenv('OPENAI_API_KEY')
                 if openai_key:
-                    self.client = OpenAI(
-                        api_key=openai_key,
-                        base_url=config.get("backend_url", "https://api.openai.com/v1")
-                    )
-                    logger.warning(f"⚠️ DeepSeek回退到OpenAI嵌入服务")
-                else:
-                    # 最后尝试DeepSeek自己的嵌入
-                    deepseek_key = os.getenv('DEEPSEEK_API_KEY')
-                    if deepseek_key:
-                        try:
-                            self.client = OpenAI(
-                                api_key=deepseek_key,
-                                base_url="https://api.deepseek.com"
-                            )
-                            logger.info(f"💡 DeepSeek使用自己的嵌入服务")
-                        except Exception as e:
-                            logger.error(f"❌ DeepSeek嵌入服务不可用: {e}")
-                            # 禁用内存功能
-                            self.client = "DISABLED"
-                            logger.info(f"🚨 内存功能已禁用，系统将继续运行但不保存历史记忆")
-                    else:
-                        # 禁用内存功能而不是抛出异常
+                    try:
+                        self.embedding = os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+                        self.client = OpenAI(
+                            api_key=openai_key,
+                            base_url="https://api.openai.com/v1"
+                        )
+                        logger.info(f"💡 使用 OpenAI 嵌入模型: {self.embedding} （聊天仍用DeepSeek）")
+                    except Exception as e:
+                        logger.error(f"❌ OpenAI嵌入初始化失败: {e}")
                         self.client = "DISABLED"
-                        logger.info(f"🚨 未找到可用的嵌入服务，内存功能已禁用")
-        elif self.llm_provider == "google":
+                else:
+                    self.client = "DISABLED"
+                    logger.info("🚨 未配置可用嵌入服务（OpenAI或DeepSeek嵌入模型），已禁用记忆功能")
+        elif (not self._embeddings_override) and self.llm_provider == "google":
             # Google AI使用阿里百炼嵌入（如果可用），否则禁用记忆功能
             dashscope_key = os.getenv('DASHSCOPE_API_KEY')
             openai_key = os.getenv('OPENAI_API_KEY')
@@ -246,8 +270,6 @@ class FinancialSituationMemory:
                 try:
                     # 尝试初始化DashScope
                     import dashscope
-                    from dashscope import TextEmbedding
-
                     self.embedding = "text-embedding-v3"
                     self.client = None
                     dashscope.api_key = dashscope_key
@@ -276,7 +298,7 @@ class FinancialSituationMemory:
                 self.fallback_available = False
                 logger.warning(f"⚠️ Google AI未找到DASHSCOPE_API_KEY，记忆功能已禁用")
                 logger.info(f"💡 系统将继续运行，但不会保存或检索历史记忆")
-        elif self.llm_provider == "openrouter":
+        elif (not self._embeddings_override) and self.llm_provider == "openrouter":
             # OpenRouter支持：优先使用阿里百炼嵌入，否则禁用记忆功能
             dashscope_key = os.getenv('DASHSCOPE_API_KEY')
             if dashscope_key:
@@ -302,10 +324,10 @@ class FinancialSituationMemory:
                 self.client = "DISABLED"
                 logger.warning(f"⚠️ OpenRouter未找到DASHSCOPE_API_KEY，记忆功能已禁用")
                 logger.info(f"💡 系统将继续运行，但不会保存或检索历史记忆")
-        elif config["backend_url"] == "http://localhost:11434/v1":
+        elif (not self._embeddings_override) and config["backend_url"] == "http://localhost:11434/v1":
             self.embedding = "nomic-embed-text"
             self.client = OpenAI(base_url=config["backend_url"])
-        else:
+        elif not self._embeddings_override:
             self.embedding = "text-embedding-3-small"
             openai_key = os.getenv('OPENAI_API_KEY')
             if openai_key:
@@ -407,17 +429,11 @@ class FinancialSituationMemory:
             'strategy': 'no_truncation_with_fallback'  # 标记策略
         }
 
-        if (self.llm_provider == "dashscope" or
-            self.llm_provider == "alibaba" or
-            self.llm_provider == "qianfan" or
-            (self.llm_provider == "google" and self.client is None) or
-            (self.llm_provider == "deepseek" and self.client is None) or
-            (self.llm_provider == "openrouter" and self.client is None)):
+        if (self.llm_provider in ("dashscope", "alibaba", "qianfan")):
             # 使用阿里百炼的嵌入模型
             try:
                 # 导入DashScope模块
                 import dashscope
-                from dashscope import TextEmbedding
 
                 # 检查DashScope API密钥是否可用
                 if not hasattr(dashscope, 'api_key') or not dashscope.api_key:
@@ -425,7 +441,7 @@ class FinancialSituationMemory:
                     return [0.0] * 1024  # 返回空向量
 
                 # 尝试调用DashScope API
-                response = TextEmbedding.call(
+                response = dashscope.TextEmbedding.call(
                     model=self.embedding,
                     input=text
                 )
@@ -524,6 +540,19 @@ class FinancialSituationMemory:
 
             except Exception as e:
                 error_str = str(e).lower()
+                # 针对 DeepSeek 404（端点不支持或模型不存在）自动回退到 OpenAI（若可用）
+                if self.llm_provider == 'deepseek' and ('404' in error_str or 'not found' in error_str):
+                    try:
+                        openai_key = os.getenv('OPENAI_API_KEY')
+                        if openai_key:
+                            fallback_model = os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+                            client = OpenAI(api_key=openai_key, base_url='https://api.openai.com/v1')
+                            resp2 = client.embeddings.create(model=fallback_model, input=text)
+                            emb2 = resp2.data[0].embedding
+                            logger.info(f"🔁 DeepSeek不支持嵌入/模型不存在，已回退OpenAI {fallback_model}")
+                            return emb2
+                    except Exception as e2:
+                        logger.error(f"❌ 回退OpenAI嵌入失败: {e2}")
                 
                 # 检查是否为长度限制错误
                 length_error_keywords = [

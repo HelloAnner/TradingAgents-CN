@@ -6,6 +6,7 @@ import sys
 import os
 import uuid
 from pathlib import Path
+from typing import Optional, Dict
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -97,7 +98,21 @@ def extract_risk_assessment(state):
         logger.info(f"提取风险评估数据时出错: {e}")
         return None
 
-def run_stock_analysis(stock_symbol, analysis_date, analysts, research_depth, llm_provider, llm_model, market_type="美股", progress_callback=None):
+def run_stock_analysis(
+    stock_symbol,
+    analysis_date,
+    analysts,
+    research_depth,
+    llm_provider,
+    llm_model,
+    quick_model=None,
+    deep_model=None,
+    llm_base_url: Optional[str] = None,
+    custom_openai_base_url: Optional[str] = None,
+    embeddings: Optional[dict] = None,
+    market_type="美股",
+    progress_callback=None,
+):
     """执行股票分析
 
     Args:
@@ -199,21 +214,35 @@ def run_stock_analysis(stock_symbol, analysis_date, analysts, research_depth, ll
 
         update_progress(f"💰 预估分析成本: ¥{estimated_cost:.4f}")
 
-    # 验证环境变量
+    # 验证环境变量（按LLM提供商有条件检查）
     update_progress("检查环境变量配置...")
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY")
     finnhub_key = os.getenv("FINNHUB_API_KEY")
 
-    logger.info(f"环境变量检查:")
-    logger.info(f"  DASHSCOPE_API_KEY: {'已设置' if dashscope_key else '未设置'}")
+    provider_required_env = {
+        "dashscope": "DASHSCOPE_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "google": "GOOGLE_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "qianfan": "QIANFAN_API_KEY"  # 具体名称视适配器而定
+    }
+
+    required_key_name = provider_required_env.get(llm_provider.lower())
+    provider_ok = True
+    if required_key_name:
+        provider_key = os.getenv(required_key_name)
+        logger.info(f"环境变量检查: {required_key_name}: {'已设置' if provider_key else '未设置'}")
+        if not provider_key:
+            raise ValueError(f"{required_key_name} 环境变量未设置")
+    else:
+        logger.info(f"环境变量检查: {llm_provider} 无需额外提供商密钥或已在适配器内部处理")
+
+    # 金融数据API（Finhub）常用，优先检查；如未设置，可继续但可能降级
     logger.info(f"  FINNHUB_API_KEY: {'已设置' if finnhub_key else '未设置'}")
-
-    if not dashscope_key:
-        raise ValueError("DASHSCOPE_API_KEY 环境变量未设置")
     if not finnhub_key:
-        raise ValueError("FINNHUB_API_KEY 环境变量未设置")
+        logger.warning("未设置 FINNHUB_API_KEY，部分数据源可能降级或不可用")
 
-    update_progress("环境变量验证通过")
+    update_progress("环境变量验证完成")
 
     try:
         # 导入必要的模块
@@ -224,8 +253,18 @@ def run_stock_analysis(stock_symbol, analysis_date, analysts, research_depth, ll
         update_progress("配置分析参数...")
         config = DEFAULT_CONFIG.copy()
         config["llm_provider"] = llm_provider
-        config["deep_think_llm"] = llm_model
-        config["quick_think_llm"] = llm_model
+        # 支持 quick/deep 单独配置；否则统一使用 llm_model
+        config["deep_think_llm"] = deep_model or llm_model
+        config["quick_think_llm"] = quick_model or llm_model
+        # 自定义聊天 Base URL（如内部OpenAI兼容或Ollama 等）
+        if llm_base_url:
+            config["backend_url"] = llm_base_url
+        # 自定义OpenAI兼容端点（TradingAgentsGraph 读取 custom_openai_base_url）
+        if custom_openai_base_url:
+            config["custom_openai_base_url"] = custom_openai_base_url
+        # 向量/嵌入模型单独配置（FinancialSituationMemory 读取）
+        if embeddings:
+            config["embeddings"] = embeddings
         # 根据研究深度调整配置
         if research_depth == 1:  # 1级 - 快速分析
             config["max_debate_rounds"] = 1
@@ -496,6 +535,7 @@ def run_stock_analysis(stock_symbol, analysis_date, analysts, research_depth, ll
 
         results = {
             'stock_symbol': stock_symbol,
+            'stock_name': preparation_result.stock_name if hasattr(preparation_result, 'stock_name') else None,
             'analysis_date': analysis_date,
             'analysts': analysts,
             'research_depth': research_depth,
@@ -538,7 +578,7 @@ def run_stock_analysis(stock_symbol, analysis_date, analysts, research_depth, ll
         # 保存分析报告到本地和MongoDB
         try:
             update_progress("💾 正在保存分析报告...")
-            from .report_exporter import save_analysis_report, save_modular_reports_to_results_dir
+            from .report_exporter import save_modular_reports_to_results_dir
             
             # 1. 保存分模块报告到本地目录
             logger.info(f"📁 [本地保存] 开始保存分模块报告到本地目录")
@@ -550,22 +590,8 @@ def run_stock_analysis(stock_symbol, analysis_date, analysts, research_depth, ll
             else:
                 logger.warning(f"⚠️ [本地保存] 本地报告文件保存失败")
             
-            # 2. 保存分析报告到MongoDB
-            logger.info(f"🗄️ [MongoDB保存] 开始保存分析报告到MongoDB")
-            save_success = save_analysis_report(
-                stock_symbol=stock_symbol,
-                analysis_results=results
-            )
-            
-            if save_success:
-                logger.info(f"✅ [MongoDB保存] 分析报告已成功保存到MongoDB")
-                update_progress("✅ 分析报告已保存到数据库和本地文件")
-            else:
-                logger.warning(f"⚠️ [MongoDB保存] MongoDB报告保存失败")
-                if local_files:
-                    update_progress("✅ 本地报告已保存，但数据库保存失败")
-                else:
-                    update_progress("⚠️ 报告保存失败，但分析已完成")
+            # 2. 已移除 MongoDB 保存逻辑，仅本地保存
+            update_progress("✅ 本地报告已保存")
                 
         except Exception as save_error:
             logger.error(f"❌ [报告保存] 保存分析报告时发生错误: {str(save_error)}")
